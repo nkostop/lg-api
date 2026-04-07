@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { RequestComposer } from './request-composer.js';
+import { RequestComposer } from '../src/agents/request-composer.js';
 
 describe('RequestComposer', () => {
   const composer = new RequestComposer();
