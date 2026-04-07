@@ -23,6 +23,7 @@ import type {
   AgentResponse,
   StreamEvent,
 } from './types.js';
+import { generateId } from '../utils/uuid.util.js';
 
 export class CliAgentConnector implements IAgentConnector {
   /**
@@ -183,6 +184,7 @@ export class CliAgentConnector implements IAgentConnector {
         messages: response.messages.map((msg) => ({
           type: msg.role === 'assistant' ? 'ai' : msg.role === 'user' ? 'human' : 'system',
           content: msg.content,
+          id: generateId(),
         })),
       },
     };
@@ -195,6 +197,7 @@ export class CliAgentConnector implements IAgentConnector {
           {
             type: msg.role === 'assistant' ? 'AIMessageChunk' : 'HumanMessageChunk',
             content: msg.content,
+            id: generateId(),
           },
         ],
       };

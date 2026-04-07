@@ -180,24 +180,33 @@ export class SqliteThreadStorage implements IThreadStorage {
 
   async getStateHistory(
     threadId: string,
-    limit?: number,
-    before?: string,
+    options?: { limit?: number; before?: string; metadata?: Record<string, unknown> },
   ): Promise<ThreadState[]> {
     const conditions: string[] = ['thread_id = ?'];
     const params: unknown[] = [threadId];
 
-    if (before) {
+    if (options?.before) {
       conditions.push('created_at < ?');
-      params.push(before);
+      params.push(options.before);
     }
 
-    const effectiveLimit = limit ?? 100;
+    const effectiveLimit = options?.limit ?? 100;
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
     const stmt = this.db.prepare(
       `SELECT * FROM ThreadState ${whereClause} ORDER BY created_at DESC, id DESC LIMIT ?`,
     );
-    const rows = stmt.all(...params, effectiveLimit) as Record<string, unknown>[];
-    return rows.map((r) => this.rowToThreadState(r));
+    let rows = stmt.all(...params, effectiveLimit) as Record<string, unknown>[];
+    let items = rows.map((r) => this.rowToThreadState(r));
+
+    if (options?.metadata) {
+      items = items.filter((s) =>
+        Object.entries(options.metadata!).every(([k, v]) =>
+          (s.metadata as Record<string, unknown>)?.[k] === v,
+        ),
+      );
+    }
+
+    return items;
   }
 
   async copyThread(sourceId: string, targetId: string): Promise<Thread> {

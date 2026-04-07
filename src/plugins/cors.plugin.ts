@@ -12,6 +12,7 @@ export default fp(
         'X-Pagination-Total',
         'X-Pagination-Offset',
         'X-Pagination-Limit',
+        'Content-Location',
       ],
       credentials: true,
     });

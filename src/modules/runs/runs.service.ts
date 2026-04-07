@@ -19,7 +19,7 @@ import { StreamManager } from '../../streaming/stream-manager.js';
 import { AgentExecutor } from '../../agents/agent-executor.js';
 import { AssistantResolver } from '../../agents/assistant-resolver.js';
 import { RequestComposer } from '../../agents/request-composer.js';
-import type { AgentResponse } from '../../agents/types.js';
+import type { AgentResponse, StreamEvent as AgentStreamEvent } from '../../agents/types.js';
 import type { RunStatus, StreamMode } from '../../types/index.js';
 import { generateId } from '../../utils/uuid.util.js';
 import { nowISO } from '../../utils/date.util.js';
@@ -606,37 +606,32 @@ export class RunsService {
         updated_at: nowISO(),
       });
 
-      // Stream agent events to client via SSE
-      // Collect the agent response from the stream to update thread state afterwards
-      const agentStream = this.agentExecutor.stream(assistant.graph_id, agentRequest);
+      // Execute agent once, update thread state, then emit SSE events from the response.
+      // This avoids the double-execution problem and ensures /history is available
+      // immediately after the stream completes.
+      const agentResponse = await this.agentExecutor.execute(assistant.graph_id, agentRequest);
 
-      // Use the stream emitter to handle SSE writing
-      await this.streamEmitter.streamFromAgent(reply, run, agentStream);
-
-      // After streaming completes, update thread state if stateful
-      // Since we streamed, we need to get the final response.
-      // The stream already emitted values and messages events.
-      // For thread state update with streaming, we re-execute to get the full response.
-      // However, since CLI agents run-to-completion before streaming, the stream
-      // already contains the full response. We need to capture it from the stream events.
-      // For now, if stateful, we execute the agent again to get the response for state update.
-      // TODO: Optimize by capturing response from stream events instead of re-executing.
+      // Update thread state before streaming so /history is ready when the UI queries it
       if (threadId) {
-        try {
-          // Re-compose the request to execute synchronously for state capture
-          const syncRequest = await this.requestComposer.composeRequest({
-            threadId,
-            runId,
-            assistantId: assistant.assistant_id,
-            input: (request.input as Record<string, unknown>) ?? {},
-            threadState: currentState,
-          });
-          const agentResponse = await this.agentExecutor.execute(assistant.graph_id, syncRequest);
-          await this.updateThreadState(threadId, request, agentResponse, currentState);
-        } catch {
-          // State update failure after successful stream is non-fatal
-        }
+        await this.updateThreadState(threadId, request, agentResponse, currentState);
       }
+
+      // Read the full thread state (updated above) for the values event
+      const updatedState = threadId
+        ? await this.threadsRepository.getState(threadId)
+        : null;
+      const allMessages = (updatedState?.['values'] as Record<string, unknown>)?.['messages'] as unknown[] ?? [];
+
+      // Emit SSE events: values has full thread state
+      async function* responseToStream(): AsyncGenerator<AgentStreamEvent> {
+        yield { event: 'metadata', data: { run_id: runId, thread_id: threadId } };
+        yield {
+          event: 'values',
+          data: { messages: allMessages },
+        };
+        yield { event: 'end', data: null };
+      }
+      await this.streamEmitter.streamFromAgent(reply, run, responseToStream());
 
       // Set run to success
       await this.runsRepository.update(run.run_id, {
@@ -697,29 +692,39 @@ export class RunsService {
     if (lastEventId) {
       const existingSession = this.streamManager.getSession(runId);
       if (existingSession) {
-        // Replay missed events
-        reply.raw.writeHead(200, {
-          'Content-Type': 'text/event-stream',
-          'Cache-Control': 'no-cache',
-          'Connection': 'keep-alive',
-          'X-Accel-Buffering': 'no',
-        });
+        // Replay missed events via PassThrough so Fastify CORS plugin applies
+        const { PassThrough } = await import('node:stream');
+        const sseStream = new PassThrough();
+        reply
+          .code(200)
+          .header('Content-Type', 'text/event-stream')
+          .header('Cache-Control', 'no-cache')
+          .header('Connection', 'keep-alive')
+          .header('X-Accel-Buffering', 'no')
+          .header('Content-Location', `/threads/${threadId}/runs/${runId}`)
+          .send(sseStream);
 
         const missed = this.streamManager.getEventsAfter(runId, lastEventId);
         for (const event of missed) {
-          reply.raw.write(`event: ${event.event}\n`);
-          reply.raw.write(`data: ${event.data}\n`);
-          reply.raw.write(`id: ${event.id}\n`);
-          reply.raw.write('\n');
+          sseStream.write(`event: ${event.event}\ndata: ${event.data}\nid: ${event.id}\n\n`);
         }
-        reply.raw.end();
+        sseStream.end();
         return;
       }
     }
 
-    // No existing session: stream fresh events using the stream emitter
-    const modes = streamModes ?? ['values'];
-    await this.streamEmitter.streamRun(reply, run, modes, lastEventId);
+    // No existing session: the run already completed and the session expired.
+    // Emit the final state from thread history so the client gets the result.
+    const currentState = await this.threadsRepository.getState(threadId);
+    const stateValues = (currentState?.['values'] as Record<string, unknown>) ?? {};
+    const messages = (stateValues['messages'] as unknown[]) ?? [];
+
+    async function* completedRunStream(): AsyncGenerator<AgentStreamEvent> {
+      yield { event: 'metadata', data: { run_id: runId, thread_id: threadId } };
+      yield { event: 'values', data: { messages } };
+      yield { event: 'end', data: null };
+    }
+    await this.streamEmitter.streamFromAgent(reply, run, completedRunStream());
   }
 
   /**
@@ -738,6 +743,7 @@ export class RunsService {
     const responseMessages = agentResponse.messages.map((m) => ({
       type: m.role === 'assistant' ? 'ai' : m.role === 'user' ? 'human' : 'system',
       content: m.content,
+      id: generateId(),
       ...(m.response_metadata ? { response_metadata: m.response_metadata } : {}),
     }));
     const allMessages = [...existingMessages, ...inputMessages, ...responseMessages];

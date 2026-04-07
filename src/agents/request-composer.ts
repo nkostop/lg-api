@@ -126,8 +126,23 @@ export class RequestComposer {
     }
 
     const msg = raw as Record<string, unknown>;
-    const content = msg['content'];
-    if (typeof content !== 'string') {
+    const rawContent = msg['content'];
+    let content: string;
+    if (typeof rawContent === 'string') {
+      content = rawContent;
+    } else if (Array.isArray(rawContent)) {
+      // LangGraph content blocks: [{"type": "text", "text": "hello"}, ...]
+      content = rawContent
+        .filter(
+          (block): block is Record<string, unknown> =>
+            block !== null &&
+            typeof block === 'object' &&
+            typeof (block as Record<string, unknown>)['text'] === 'string',
+        )
+        .map((block) => block['text'] as string)
+        .join('\n');
+      if (!content) return null;
+    } else {
       return null;
     }
 

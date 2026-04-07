@@ -107,19 +107,27 @@ export class ThreadsRepository extends InMemoryRepository<Thread> {
    */
   async getStateHistory(
     threadId: string,
-    options: SearchOptions
-  ): Promise<SearchResult<ThreadState>> {
+    options?: { limit?: number; before?: string; metadata?: Record<string, unknown> },
+  ): Promise<ThreadState[]> {
     const stateHistory = this.states.get(threadId) ?? [];
 
     // Return in reverse chronological order (most recent first)
-    const reversed = [...stateHistory].reverse();
-    const total = reversed.length;
-    const items = reversed.slice(options.offset, options.offset + options.limit);
+    let reversed = [...stateHistory].reverse();
 
-    return {
-      items: items.map((s) => structuredClone(s)),
-      total,
-    };
+    if (options?.before) {
+      reversed = reversed.filter((s) => s.created_at < options.before!);
+    }
+
+    if (options?.metadata) {
+      reversed = reversed.filter((s) =>
+        Object.entries(options.metadata!).every(([k, v]) =>
+          (s.metadata as Record<string, unknown>)?.[k] === v,
+        ),
+      );
+    }
+
+    const items = reversed.slice(0, options?.limit ?? 10);
+    return items.map((s) => structuredClone(s));
   }
 
   /**

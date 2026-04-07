@@ -331,14 +331,11 @@ export class ThreadsService {
       throw new ApiError(404, `Thread ${threadId} not found`);
     }
 
-    const limit = params.limit ?? 10;
-    const offset = 0;
-
-    const options: SearchOptions = {
-      limit,
-      offset,
-    };
-
-    return this.repository.getStateHistory(threadId, options);
+    const items = await this.repository.getStateHistory(threadId, {
+      limit: params.limit ?? 10,
+      before: params.before as string | undefined,
+      metadata: params.metadata as Record<string, unknown> | undefined,
+    });
+    return { items, total: items.length };
   }
 }
