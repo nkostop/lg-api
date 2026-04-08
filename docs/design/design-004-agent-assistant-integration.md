@@ -595,12 +595,15 @@ export class ApiAgentConnector implements IAgentConnector {
     }
 
     // Emit values event with the full response state
+    // Note: In the actual streaming flow (RunsService.streamRun), the values event
+    // contains the full thread message history, not just the new response.
     yield {
       event: 'values',
       data: {
         messages: response.messages.map((msg) => ({
           type: msg.role === 'assistant' ? 'ai' : msg.role === 'user' ? 'human' : 'system',
           content: msg.content,
+          id: generateId(),
         })),
       },
     };
@@ -941,44 +944,31 @@ try {
 3.    run = createRunRecord(threadId, assistant.assistant_id, request)
 4.    runsRepository.update(run.run_id, { status: 'running' })
 5.    if (threadId) threadsRepository.update(threadId, { status: 'busy' })
-6.    // Set SSE headers
-7.    reply.raw.writeHead(200, {
-8.      'Content-Type': 'text/event-stream',
-9.      'Cache-Control': 'no-cache',
-10.     'Connection': 'keep-alive',
-11.     'X-Accel-Buffering': 'no',
-12.   })
-13.   // Create stream session for replay support
-14.   session = streamManager.createSession(run.run_id, threadId, streamModes)
-15.   // Compose agent request
-16.   threadState = threadId ? threadStorage.getState(threadId) : null
-17.   agentRequest = requestComposer.composeRequest({ ... })
-18.   // Stream agent events
-19.   try {
-20.     collectedResponse = null
-21.     for await (event of agentExecutor.stream(assistant.graph_id, agentRequest)) {
-22.       writeSSE(reply, session, event.event, event.data)  // write to reply.raw
-23.       if (event.event === 'values') {
-24.         collectedResponse = event.data  // capture for state update
-25.       }
-26.     }
-27.     // Update thread state with collected response
-28.     if (threadId && collectedResponse) {
-29.       updateThreadStateFromStreamData(threadId, request.input, collectedResponse, threadState)
-30.     }
-31.     runsRepository.update(run.run_id, { status: 'success' })
-32.     if (threadId) threadsRepository.update(threadId, { status: 'idle' })
-33.   } catch (error) {
-34.     writeSSE(reply, session, 'error', { message: error.message })
-35.     runsRepository.update(run.run_id, { status: 'error' })
-36.     if (threadId) threadsRepository.update(threadId, { status: 'error' })
-37.   } finally {
-38.     streamManager.closeSession(run.run_id)
-39.     reply.raw.end()
-40.   }
+6.    // Compose agent request
+7.    threadState = threadId ? threadStorage.getState(threadId) : null
+8.    agentRequest = requestComposer.composeRequest({ ... })
+9.    // Execute agent once (no double execution)
+10.   agentResponse = agentExecutor.execute(assistant.graph_id, agentRequest)
+11.   // Update thread state BEFORE streaming so /history is ready
+12.   if (threadId) updateThreadState(threadId, request, agentResponse, threadState)
+13.   // Read full updated thread state for the values event
+14.   updatedState = threadId ? threadStorage.getState(threadId) : null
+15.   allMessages = updatedState?.values?.messages ?? []
+16.   // Build SSE events from the completed response
+17.   function* responseToStream():
+18.     yield { event: 'metadata', data: { run_id, thread_id } }
+19.     yield { event: 'values', data: { messages: allMessages } }  // full thread history
+20.     yield { event: 'end', data: null }
+21.   // Stream events via RunStreamEmitter (uses PassThrough + Fastify CORS)
+22.   streamEmitter.streamFromAgent(reply, run, responseToStream())
+23.   runsRepository.update(run.run_id, { status: 'success' })
+24.   if (threadId) threadsRepository.update(threadId, { status: 'idle' })
 ```
 
-**Key point:** The `RunStreamEmitter` is bypassed. `RunsService.streamRun()` writes SSE events directly using the `reply.raw` pattern already established in the codebase. The emitter class remains in the codebase but is effectively deprecated.
+**Key points:**
+- The agent is executed **once** synchronously. Thread state is updated before SSE events are emitted, ensuring `/history` is available immediately when the UI queries it after stream completion.
+- The `values` event contains the **full thread message history** (not just the new response).
+- SSE headers are set via Fastify's `reply.send(PassThrough)` pattern so the CORS plugin applies. A `Content-Location` header is included (required by the LangGraph JS SDK).
 
 ### 5.5 Thread State Update Logic
 
@@ -997,10 +987,12 @@ private async updateThreadState(
   // 2. Extract new user messages from input
   const inputMessages = (input?.messages as unknown[]) || [];
 
-  // 3. Map agent response messages to LangGraph format
+  // 3. Map agent response messages to LangGraph format (with UUIDs)
   const responseMessages = agentResponse.messages.map((msg) => ({
     type: msg.role === 'assistant' ? 'ai' : msg.role === 'user' ? 'human' : 'system',
     content: msg.content,
+    id: generateId(),
+    ...(msg.response_metadata ? { response_metadata: msg.response_metadata } : {}),
   }));
 
   // 4. Combine all messages
