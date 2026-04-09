@@ -274,7 +274,7 @@ describe('SQLite Thread Storage', () => {
       );
     }
 
-    const history = await provider.threads.getStateHistory(t.thread_id, 2);
+    const history = await provider.threads.getStateHistory(t.thread_id, { limit: 2 });
     expect(history.length).toBe(2);
   });
 

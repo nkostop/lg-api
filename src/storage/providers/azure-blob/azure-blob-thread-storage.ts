@@ -159,8 +159,7 @@ export class AzureBlobThreadStorage implements IThreadStorage {
 
   async getStateHistory(
     threadId: string,
-    limit?: number,
-    before?: string,
+    options?: { limit?: number; before?: string; metadata?: Record<string, unknown> },
   ): Promise<ThreadState[]> {
     const prefix = `${threadId}_history/`;
     const blobs = await listBlobsByPrefix(this.containerClient, prefix);
@@ -168,13 +167,21 @@ export class AzureBlobThreadStorage implements IThreadStorage {
     // Sort descending by name (ISO timestamp-based)
     blobs.sort((a, b) => b.name.localeCompare(a.name));
 
+    const limit = options?.limit;
+    const before = options?.before;
+    const metadata = options?.metadata;
+
     // Download states
     const states: ThreadState[] = [];
     for (const blob of blobs) {
       const state = await downloadJson<ThreadState>(this.containerClient, blob.name);
       if (state) {
-        // If 'before' is specified, filter to states created before that timestamp
         if (before && state.created_at >= before) {
+          continue;
+        }
+        if (metadata && !Object.entries(metadata).every(([k, v]) =>
+          (state.metadata as Record<string, unknown>)?.[k] === v,
+        )) {
           continue;
         }
         states.push(state);

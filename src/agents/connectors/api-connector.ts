@@ -22,6 +22,7 @@ import type {
   StreamEvent,
 } from '../types.js';
 import { ApiError } from '../../errors/api-error.js';
+import { generateId } from '../../utils/uuid.util.js';
 
 export class ApiAgentConnector implements IAgentConnector {
   /**
@@ -135,6 +136,7 @@ export class ApiAgentConnector implements IAgentConnector {
         messages: response.messages.map((msg) => ({
           type: msg.role === 'assistant' ? 'ai' : msg.role === 'user' ? 'human' : 'system',
           content: msg.content,
+          id: generateId(),
         })),
       },
     };
@@ -147,6 +149,7 @@ export class ApiAgentConnector implements IAgentConnector {
           {
             type: msg.role === 'assistant' ? 'AIMessageChunk' : 'HumanMessageChunk',
             content: msg.content,
+            id: generateId(),
           },
         ],
       };

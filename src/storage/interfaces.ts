@@ -40,7 +40,14 @@ export interface IThreadStorage {
   // Thread-specific
   getState(threadId: string): Promise<ThreadState | null>;
   addState(threadId: string, state: ThreadState): Promise<void>;
-  getStateHistory(threadId: string, limit?: number, before?: string): Promise<ThreadState[]>;
+  getStateHistory(
+    threadId: string,
+    options?: {
+      limit?: number;
+      before?: string;
+      metadata?: Record<string, unknown>;
+    },
+  ): Promise<ThreadState[]>;
   copyThread(sourceId: string, targetId: string): Promise<Thread>;
 }
 

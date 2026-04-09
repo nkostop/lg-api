@@ -5,6 +5,7 @@
  * stream mode, writing directly to the raw HTTP response.
  */
 
+import { PassThrough, type Writable } from 'node:stream';
 import type { FastifyReply } from 'fastify';
 import { StreamManager, StreamEvent, StreamSession } from '../../streaming/stream-manager.js';
 import type { StreamMode } from '../../types/index.js';
@@ -35,13 +36,20 @@ export class RunStreamEmitter {
     streamModes: StreamMode[],
     lastEventId?: string,
   ): Promise<void> {
-    // Set SSE headers
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
+    // Set SSE headers via Fastify so CORS plugin headers are included,
+    // then send a PassThrough stream to keep the connection open.
+    const contentLocation = run.thread_id
+      ? `/threads/${run.thread_id}/runs/${run.run_id}`
+      : `/runs/${run.run_id}`;
+    const sseStream = new PassThrough();
+    reply
+      .code(200)
+      .header('Content-Type', 'text/event-stream')
+      .header('Cache-Control', 'no-cache')
+      .header('Connection', 'keep-alive')
+      .header('X-Accel-Buffering', 'no')
+      .header('Content-Location', contentLocation)
+      .send(sseStream);
 
     const session = this.streamManager.createSession(
       run.run_id,
@@ -56,15 +64,15 @@ export class RunStreamEmitter {
         lastEventId,
       );
       for (const event of missed) {
-        this.writeEvent(reply, event);
+        this.writeEvent(sseStream, event);
       }
-      reply.raw.end();
+      sseStream.end();
       return;
     }
 
     try {
       // 1. Emit metadata event
-      await this.emit(reply, session, 'metadata', {
+      await this.emit(sseStream, session, 'metadata', {
         run_id: run.run_id,
         thread_id: run.thread_id,
       });
@@ -73,20 +81,20 @@ export class RunStreamEmitter {
 
       // 2. Emit mode-specific stub events
       for (const mode of streamModes) {
-        await this.emitModeEvent(reply, session, mode, run);
+        await this.emitModeEvent(sseStream, session, mode, run);
         await delay(50);
       }
 
       // 3. Emit end event
-      await this.emit(reply, session, 'end', null);
+      await this.emit(sseStream, session, 'end', null);
     } catch (error: unknown) {
       const message = error instanceof Error
         ? error.message
         : 'Unknown streaming error';
-      await this.emit(reply, session, 'error', { message });
+      await this.emit(sseStream, session, 'error', { message });
     } finally {
       this.streamManager.closeSession(run.run_id);
-      reply.raw.end();
+      sseStream.end();
     }
   }
 
@@ -94,14 +102,14 @@ export class RunStreamEmitter {
    * Emit a mode-specific stub event based on the requested stream mode.
    */
   private async emitModeEvent(
-    reply: FastifyReply,
+    stream: Writable,
     session: StreamSession,
     mode: StreamMode,
     run: Run,
   ): Promise<void> {
     switch (mode) {
       case 'values':
-        await this.emit(reply, session, 'values', {
+        await this.emit(stream, session, 'values', {
           messages: [
             {
               type: 'ai',
@@ -113,7 +121,7 @@ export class RunStreamEmitter {
         break;
 
       case 'updates':
-        await this.emit(reply, session, 'updates', {
+        await this.emit(stream, session, 'updates', {
           agent: {
             messages: [
               {
@@ -127,7 +135,7 @@ export class RunStreamEmitter {
         break;
 
       case 'messages':
-        await this.emit(reply, session, 'messages', [
+        await this.emit(stream, session, 'messages', [
           {
             type: 'AIMessageChunk',
             content: 'Stub message chunk.',
@@ -137,13 +145,13 @@ export class RunStreamEmitter {
         break;
 
       case 'messages-tuple':
-        await this.emit(reply, session, 'messages/partial', [
+        await this.emit(stream, session, 'messages/partial', [
           ['ai', { content: 'Stub tuple message.', id: generateId() }],
         ]);
         break;
 
       case 'events':
-        await this.emit(reply, session, 'events', {
+        await this.emit(stream, session, 'events', {
           event: 'on_chain_end',
           name: 'agent',
           run_id: run.run_id,
@@ -152,7 +160,7 @@ export class RunStreamEmitter {
         break;
 
       case 'debug':
-        await this.emit(reply, session, 'debug', {
+        await this.emit(stream, session, 'debug', {
           type: 'task_result',
           timestamp: nowISO(),
           step: 1,
@@ -161,14 +169,14 @@ export class RunStreamEmitter {
         break;
 
       case 'custom':
-        await this.emit(reply, session, 'custom', {
+        await this.emit(stream, session, 'custom', {
           type: 'stub_custom_event',
           data: {},
         });
         break;
 
       case 'tasks':
-        await this.emit(reply, session, 'tasks', {
+        await this.emit(stream, session, 'tasks', {
           task_id: generateId(),
           name: 'agent',
           status: 'completed',
@@ -177,7 +185,7 @@ export class RunStreamEmitter {
         break;
 
       case 'checkpoints':
-        await this.emit(reply, session, 'checkpoints', {
+        await this.emit(stream, session, 'checkpoints', {
           thread_id: run.thread_id,
           checkpoint_ns: '',
           checkpoint_id: generateId(),
@@ -190,7 +198,7 @@ export class RunStreamEmitter {
    * Emit a single SSE event: buffer it in the session and write to the response.
    */
   private async emit(
-    reply: FastifyReply,
+    stream: Writable,
     session: StreamSession,
     event: string,
     data: unknown,
@@ -202,7 +210,7 @@ export class RunStreamEmitter {
       id: String(session.lastEventId),
     };
     session.eventBuffer.push(streamEvent);
-    this.writeEvent(reply, streamEvent);
+    this.writeEvent(stream, streamEvent);
   }
 
   /**
@@ -220,13 +228,20 @@ export class RunStreamEmitter {
     run: Run,
     agentStream: AsyncGenerator<AgentStreamEvent>,
   ): Promise<void> {
-    // Set SSE headers
-    reply.raw.writeHead(200, {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'X-Accel-Buffering': 'no',
-    });
+    // Set SSE headers via Fastify so CORS plugin headers are included,
+    // then send a PassThrough stream to keep the connection open.
+    const contentLocation = run.thread_id
+      ? `/threads/${run.thread_id}/runs/${run.run_id}`
+      : `/runs/${run.run_id}`;
+    const sseStream = new PassThrough();
+    reply
+      .code(200)
+      .header('Content-Type', 'text/event-stream')
+      .header('Cache-Control', 'no-cache')
+      .header('Connection', 'keep-alive')
+      .header('X-Accel-Buffering', 'no')
+      .header('Content-Location', contentLocation)
+      .send(sseStream);
 
     const session = this.streamManager.createSession(run.run_id, run.thread_id, []);
 
@@ -239,7 +254,7 @@ export class RunStreamEmitter {
           id: String(session.lastEventId),
         };
         session.eventBuffer.push(streamEvent);
-        this.writeEvent(reply, streamEvent);
+        this.writeEvent(sseStream, streamEvent);
       }
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Unknown streaming error';
@@ -250,10 +265,10 @@ export class RunStreamEmitter {
         id: String(session.lastEventId),
       };
       session.eventBuffer.push(errorEvent);
-      this.writeEvent(reply, errorEvent);
+      this.writeEvent(sseStream, errorEvent);
     } finally {
       this.streamManager.closeSession(run.run_id);
-      reply.raw.end();
+      sseStream.end();
     }
   }
 
@@ -267,10 +282,7 @@ export class RunStreamEmitter {
   /**
    * Write a single SSE event to the raw HTTP response in standard SSE format.
    */
-  private writeEvent(reply: FastifyReply, event: StreamEvent): void {
-    reply.raw.write(`event: ${event.event}\n`);
-    reply.raw.write(`data: ${event.data}\n`);
-    reply.raw.write(`id: ${event.id}\n`);
-    reply.raw.write('\n');
+  private writeEvent(stream: Writable, event: StreamEvent): void {
+    stream.write(`event: ${event.event}\ndata: ${event.data}\nid: ${event.id}\n\n`);
   }
 }

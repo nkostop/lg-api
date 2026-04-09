@@ -97,7 +97,7 @@ export const UpdateThreadStateRequestSchema = Type.Object({
 // --- Thread History Request ---
 export const ThreadHistoryRequestSchema = Type.Object({
   limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 1000 })),
-  before: Type.Optional(Type.String({ format: 'date-time' })),
+  before: Type.Optional(Type.Union([Type.String(), CheckpointSchema])),
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   checkpoint: Type.Optional(CheckpointSchema),
 });

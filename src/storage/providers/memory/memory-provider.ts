@@ -93,24 +93,11 @@ class MemoryThreadStorage implements IThreadStorage {
     return this.repo.addState(threadId, state as unknown as RepoThreadState);
   }
 
-  async getStateHistory(threadId: string, limit?: number, before?: string): Promise<ThreadState[]> {
-    // The existing repo uses SearchOptions for getStateHistory.
-    // We adapt the simplified interface (limit, before) to it.
-    const options: SearchOptions = {
-      limit: limit ?? 100,
-      offset: 0,
-      sortOrder: 'desc',
-    };
-
-    const result = await this.repo.getStateHistory(threadId, options);
-    const items = result.items as unknown as ThreadState[];
-
-    // If 'before' is specified, filter to states created before that timestamp
-    if (before) {
-      return items.filter((s) => s.created_at < before);
-    }
-
-    return items;
+  async getStateHistory(
+    threadId: string,
+    options?: { limit?: number; before?: string; metadata?: Record<string, unknown> },
+  ): Promise<ThreadState[]> {
+    return this.repo.getStateHistory(threadId, options) as unknown as Promise<ThreadState[]>;
   }
 
   async copyThread(sourceId: string, targetId: string): Promise<Thread> {

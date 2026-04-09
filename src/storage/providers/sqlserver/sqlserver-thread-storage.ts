@@ -183,19 +183,18 @@ export class SqlServerThreadStorage implements IThreadStorage {
 
   async getStateHistory(
     threadId: string,
-    limit?: number,
-    before?: string,
+    options?: { limit?: number; before?: string; metadata?: Record<string, unknown> },
   ): Promise<ThreadState[]> {
     const request = this.pool.request();
     request.input('thread_id', sql.NVarChar(36), threadId);
 
     const clauses = ['thread_id = @thread_id'];
-    if (before) {
-      request.input('before', sql.NVarChar, before);
+    if (options?.before) {
+      request.input('before', sql.NVarChar, options.before);
       clauses.push('created_at < @before');
     }
 
-    const fetchLimit = limit ?? 100;
+    const fetchLimit = options?.limit ?? 100;
     request.input('limit', sql.Int, fetchLimit);
 
     const result = await request.query<Record<string, unknown>>(`
@@ -205,7 +204,17 @@ export class SqlServerThreadStorage implements IThreadStorage {
       OFFSET 0 ROWS FETCH NEXT @limit ROWS ONLY
     `);
 
-    return result.recordset.map((row) => this.rowToThreadState(row));
+    let items = result.recordset.map((row) => this.rowToThreadState(row));
+
+    if (options?.metadata) {
+      items = items.filter((s) =>
+        Object.entries(options.metadata!).every(([k, v]) =>
+          (s.metadata as Record<string, unknown>)?.[k] === v,
+        ),
+      );
+    }
+
+    return items;
   }
 
   async copyThread(sourceId: string, targetId: string): Promise<Thread> {

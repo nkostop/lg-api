@@ -17,9 +17,9 @@ export const ConfigSchema = Type.Object({
 
 // --- Checkpoint ---
 export const CheckpointSchema = Type.Object({
-  thread_id: Type.String({ format: 'uuid' }),
-  checkpoint_ns: Type.String(),
-  checkpoint_id: Type.String({ format: 'uuid' }),
+  thread_id: Type.Optional(Type.String({ format: 'uuid' })),
+  checkpoint_ns: Type.Optional(Type.String()),
+  checkpoint_id: Type.Optional(Type.String({ format: 'uuid' })),
   checkpoint_map: Type.Optional(
     Type.Record(Type.String(), Type.String())
   ),
