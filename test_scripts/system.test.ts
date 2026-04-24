@@ -44,6 +44,31 @@ describe('System API', () => {
   });
 
   // -------------------------------------------------------------------
+  // GET /ok-silent - Health check without request logging
+  // -------------------------------------------------------------------
+  describe('GET /ok-silent', () => {
+    it('should return 200 with { ok: true }', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/ok-silent',
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.payload);
+      expect(body).toEqual({ ok: true });
+    });
+
+    it('should have content-type application/json', async () => {
+      const res = await app.inject({
+        method: 'GET',
+        url: '/ok-silent',
+      });
+
+      expect(res.headers['content-type']).toContain('application/json');
+    });
+  });
+
+  // -------------------------------------------------------------------
   // GET /info - Server info
   // -------------------------------------------------------------------
   describe('GET /info', () => {

@@ -4,7 +4,7 @@ import { ApiError } from '../errors/api-error.js';
 import { ErrorCodes } from '../errors/error-codes.js';
 import type { AppConfig } from '../config/env.config.js';
 
-const SKIP_PATHS = ['/ok', '/docs'];
+const SKIP_PATHS = ['/ok', '/ok-silent', '/docs'];
 
 function shouldSkip(url: string): boolean {
   return SKIP_PATHS.some((path) => url === path || url.startsWith(path + '/'));

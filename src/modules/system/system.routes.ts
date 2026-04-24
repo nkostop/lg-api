@@ -4,8 +4,9 @@
  * Fastify plugin that registers system-level API endpoints.
  *
  * Endpoints:
- *   GET /ok   -> health check
- *   GET /info -> server info and capabilities
+ *   GET /ok         -> health check
+ *   GET /ok-silent  -> health check without request logging (for k8s probes)
+ *   GET /info       -> server info and capabilities
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from 'fastify';
@@ -23,6 +24,27 @@ const systemRoutes: FastifyPluginAsync = async (fastify: FastifyInstance) => {
       description: `Returns a simple success response indicating the server is running and able to handle requests. This endpoint is used for load balancer health checks, uptime monitoring, and deployment verification.
 
 In the LangGraph Platform, the health check endpoint does not verify connectivity to dependent services (database, Redis, etc.). It only confirms the HTTP server process is responsive. No authentication is required and processing is minimal, returning immediately with a JSON object containing an **ok** status.`,
+      response: {
+        200: Type.Object({
+          ok: Type.Boolean(),
+        }),
+      },
+    },
+  }, async (_request, reply) => {
+    return reply.status(200).send({ ok: true });
+  });
+
+  // GET /ok-silent -> health check that does not emit request/response logs.
+  // Intended for high-frequency Kubernetes liveness/readiness probes so they
+  // do not flood container stdout. Functionally identical to /ok.
+  fastify.get('/ok-silent', {
+    logLevel: 'silent',
+    schema: {
+      tags: ['System'],
+      summary: 'Silent health check (no request logs)',
+      description: `Identical to **/ok** but suppresses the per-request access log. Use this endpoint for Kubernetes liveness/readiness probes or other high-frequency health checks where logging every probe would clutter container stdout.
+
+No authentication is required and processing is minimal, returning immediately with a JSON object containing an **ok** status.`,
       response: {
         200: Type.Object({
           ok: Type.Boolean(),
