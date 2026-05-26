@@ -430,6 +430,100 @@ describe('Runs API', () => {
       expect(body.result).toHaveProperty('messages');
       expect(Array.isArray(body.result.messages)).toBe(true);
     });
+
+    it('should return 404 for non-existent thread by default (matches real LangGraph)', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/threads/${randomUUID()}/runs/wait`,
+        payload: {
+          assistant_id: randomUUID(),
+          input: { messages: [{ role: 'user', content: 'hi' }] },
+        },
+      });
+
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('should auto-create thread when if_not_exists=create', async () => {
+      const threadId = randomUUID();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/threads/${threadId}/runs/wait`,
+        payload: {
+          assistant_id: randomUUID(),
+          input: { messages: [{ role: 'user', content: 'hi' }] },
+          if_not_exists: 'create',
+        },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.payload);
+      expect(body).toHaveProperty('thread_id', threadId);
+      expect(body).toHaveProperty('status', 'success');
+
+      // Verify the thread was actually persisted in the shared repo
+      const created = await threadsService.get(threadId);
+      expect(created).toHaveProperty('thread_id', threadId);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // if_not_exists semantics on createStateful and streamRun
+  // -------------------------------------------------------------------
+  describe('if_not_exists semantics', () => {
+    it('createStateful: returns 404 by default for non-existent thread', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/threads/${randomUUID()}/runs`,
+        payload: { assistant_id: randomUUID() },
+      });
+
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('createStateful: auto-creates thread when if_not_exists=create', async () => {
+      const threadId = randomUUID();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/threads/${threadId}/runs`,
+        payload: { assistant_id: randomUUID(), if_not_exists: 'create' },
+      });
+
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.payload);
+      expect(body).toHaveProperty('thread_id', threadId);
+
+      const created = await threadsService.get(threadId);
+      expect(created).toHaveProperty('thread_id', threadId);
+    });
+
+    it('streamRun: returns 404 by default for non-existent thread', async () => {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/threads/${randomUUID()}/runs/stream`,
+        payload: { assistant_id: randomUUID() },
+      });
+
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('streamRun: auto-creates thread when if_not_exists=create', async () => {
+      const threadId = randomUUID();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/threads/${threadId}/runs/stream`,
+        payload: { assistant_id: randomUUID(), if_not_exists: 'create' },
+      });
+
+      // SSE stream — 200 with text/event-stream content type
+      expect(res.statusCode).toBe(200);
+
+      const created = await threadsService.get(threadId);
+      expect(created).toHaveProperty('thread_id', threadId);
+    });
   });
 
   // -------------------------------------------------------------------

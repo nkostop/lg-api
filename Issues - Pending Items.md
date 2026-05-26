@@ -55,6 +55,11 @@
 
 ## Completed Items
 
+### C7 - Run creation ignored `if_not_exists` and always 404'd on missing thread
+- **Files**: `src/modules/runs/runs.service.ts`, `test_scripts/runs.test.ts`
+- **Issue**: The `RunCreateRequestSchema` declared `if_not_exists: "create" | "reject"` (`src/schemas/run.schema.ts:54`) and the project docs cited the real LangGraph semantics (`docs/reference/langgraph-api-concepts.md:848`), but `RunsService` never read the field. `createStateful` (line 61), `wait` (line 439), and `streamRun` (line 570) each contained an inline `getById` + `throw new ApiError(404, ...)` block that unconditionally rejected missing threads. Real LangGraph honors `if_not_exists: "create"` and auto-creates the thread, which is why the NBG `agent-proxy` (`Nbg.NetCore.AI.Agents.Common/Models/LangGraph/ChatModels.cs:30-33`, default `"create"`) works against cloud LangGraph but got `{"detail":"Thread <id> not found"}` against lg-api.
+- **Fix**: Added a private `RunsService.ensureThread(threadId, ifNotExists)` helper that returns the existing thread, auto-creates it when `ifNotExists === "create"`, or throws 404 otherwise (default — matches real LangGraph). Replaced all three inline 404 sites with calls to the helper threading `request.if_not_exists` through. Added six vitest cases in `test_scripts/runs.test.ts` covering both branches for `createStateful`, `wait`, and `streamRun`.
+
 ### C6 - SQLite schema uses unquoted `values` column name (reserved keyword)
 - **Files**: `src/storage/providers/sqlite/sqlite-schema.ts`, `src/storage/providers/sqlite/sqlite-thread-storage.ts`
 - **Description**: The Thread and ThreadState table DDL and INSERT/UPDATE queries used `values` as a column name without quoting. `VALUES` is a reserved keyword in SQLite, causing "near values: syntax error" on table creation and all queries referencing this column.

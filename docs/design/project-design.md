@@ -1711,6 +1711,24 @@ export interface IRunsService {
 }
 ```
 
+**`if_not_exists` semantics (real-LangGraph contract).** All stateful run-creation
+paths — `createStateful`, `wait`, and `streamRun` — honor the run body's
+`if_not_exists` field (declared in `RunCreateRequestSchema`):
+
+- `"create"` → if the referenced thread does not exist, the service auto-creates
+  it (status `idle`, empty metadata/values) before kicking off the run.
+- `"reject"` (default; matches the real LangGraph Platform) → throw
+  `ApiError(404, "Thread <id> not found")`.
+
+The behavior is centralized in a single private helper
+`RunsService.ensureThread(threadId, ifNotExists)` which is called from each of
+the three stateful paths. The default-`"reject"` policy preserves spec parity
+with cloud LangGraph; clients that want auto-create (e.g. the NBG `agent-proxy`,
+which sets the field to `"create"` in `Nbg.NetCore.AI.Agents.Common/Models/LangGraph/ChatModels.cs`)
+get the behavior by passing it explicitly in the run body. See
+`Issues - Pending Items.md` entry C7 for the root cause and the call sites
+that were refactored.
+
 **CronsService:**
 
 ```typescript

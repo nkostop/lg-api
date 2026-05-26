@@ -13,7 +13,7 @@
 import type { Static } from '@sinclair/typebox';
 import type { FastifyReply } from 'fastify';
 import { RunsRepository, Run } from './runs.repository.js';
-import { ThreadsRepository } from '../threads/threads.repository.js';
+import { ThreadsRepository, Thread } from '../threads/threads.repository.js';
 import { RunStreamEmitter } from './runs.streaming.js';
 import { StreamManager } from '../../streaming/stream-manager.js';
 import { AgentExecutor } from '../../agents/agent-executor.js';
@@ -57,11 +57,8 @@ export class RunsService {
    * and updates thread state with the response.
    */
   async createStateful(threadId: string, request: RunCreateRequest): Promise<Run> {
-    // Verify thread exists
-    const thread = await this.threadsRepository.getById(threadId);
-    if (!thread) {
-      throw new ApiError(404, `Thread ${threadId} not found`);
-    }
+    // Verify thread exists (or create on the fly if `if_not_exists: "create"`).
+    await this.ensureThread(threadId, request.if_not_exists);
 
     // Resolve assistant early so the run record stores the real UUID
     const assistant = await this.assistantResolver.resolve(request.assistant_id);
@@ -435,11 +432,8 @@ export class RunsService {
       // Get thread state if stateful
       let currentState: Record<string, unknown> = { values: {} };
       if (threadId) {
-        // Verify thread exists
-        const thread = await this.threadsRepository.getById(threadId);
-        if (!thread) {
-          throw new ApiError(404, `Thread ${threadId} not found`);
-        }
+        // Verify thread exists (or create on the fly if `if_not_exists: "create"`).
+        await this.ensureThread(threadId, request.if_not_exists);
 
         // Set thread to busy
         await this.threadsRepository.update(threadId, {
@@ -565,12 +559,9 @@ export class RunsService {
 
     await this.runsRepository.create(run.run_id, run);
 
-    // Set thread to busy if stateful
+    // Set thread to busy if stateful (auto-create if `if_not_exists: "create"`).
     if (threadId) {
-      const thread = await this.threadsRepository.getById(threadId);
-      if (!thread) {
-        throw new ApiError(404, `Thread ${threadId} not found`);
-      }
+      await this.ensureThread(threadId, request.if_not_exists);
       await this.threadsRepository.update(threadId, {
         status: 'busy',
         updated_at: nowISO(),
@@ -771,5 +762,39 @@ export class RunsService {
       values: newValues,
       updated_at: now,
     });
+  }
+
+  /**
+   * Look up the thread referenced by a run request. If the thread does not
+   * exist, honor the run body's `if_not_exists` field — matching the real
+   * LangGraph Platform contract:
+   *   - "create"  → create the thread on the fly with the given id and return it.
+   *   - "reject"  → throw 404 (default; matches real LangGraph).
+   *   - undefined → treated as "reject".
+   *
+   * Centralized here so createStateful / wait / streamRun all share the same
+   * semantics. See Issues - Pending Items.md (LG-IF-NOT-EXISTS) for context.
+   */
+  private async ensureThread(
+    threadId: string,
+    ifNotExists: 'create' | 'reject' | undefined,
+  ): Promise<Thread> {
+    const existing = await this.threadsRepository.getById(threadId);
+    if (existing) {
+      return existing;
+    }
+    if (ifNotExists === 'create') {
+      const now = nowISO();
+      const thread: Thread = {
+        thread_id: threadId,
+        created_at: now,
+        updated_at: now,
+        metadata: {},
+        status: 'idle',
+        values: {},
+      };
+      return this.threadsRepository.create(threadId, thread);
+    }
+    throw new ApiError(404, `Thread ${threadId} not found`);
   }
 }
