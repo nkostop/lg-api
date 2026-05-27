@@ -10,6 +10,7 @@ import type { SearchOptions, SearchResult } from '../../repositories/interfaces.
 import { ApiError } from '../../errors/api-error.js';
 import { generateId } from '../../utils/uuid.util.js';
 import { nowISO } from '../../utils/date.util.js';
+import { reduceChannels } from '../../agents/state-reducer.js';
 
 export interface CreateThreadParams {
   metadata?: Record<string, unknown>;
@@ -288,12 +289,29 @@ export class ThreadsService {
     const now = nowISO();
     const checkpointId = params.checkpoint_id ?? generateId();
 
-    // Get the current state to use as parent
+    // Get the current state to use as parent and as the merge base.
     const currentState = await this.repository.getState(threadId);
     const parentCheckpoint = currentState?.checkpoint ?? null;
 
+    // Per-channel merge for the nested `state` blob: incoming `values.state`
+    // keys are reduced (default LastValue) over the existing thread's
+    // `values.state`, so a partial manual update retains sibling keys instead
+    // of wiping them. Every other top-level `values` key (e.g. messages) is
+    // passed through as given. This makes POST /state behave like LangGraph's
+    // reducer-routed update_state; a deliberate full reset of the state blob is
+    // still expressible by sending every key.
+    const currentValues = (currentState?.values as Record<string, unknown> | undefined) ?? {};
+    const currentStateBlob = (currentValues['state'] as Record<string, unknown>) ?? {};
+    const incomingStateBlob = params.values['state'] as Record<string, unknown> | undefined;
+    const mergedValues: Record<string, unknown> = {
+      ...params.values,
+      ...(incomingStateBlob !== undefined
+        ? { state: reduceChannels(currentStateBlob, incomingStateBlob) }
+        : {}),
+    };
+
     const newState: ThreadState = {
-      values: params.values,
+      values: mergedValues,
       next: [],
       checkpoint: params.checkpoint ?? {
         thread_id: threadId,
@@ -315,7 +333,7 @@ export class ThreadsService {
 
     // Update thread values and timestamp
     await this.repository.update(threadId, {
-      values: params.values,
+      values: mergedValues,
       updated_at: now,
     } as Partial<Thread>);
 

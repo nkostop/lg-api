@@ -19,6 +19,7 @@ import { StreamManager } from '../../streaming/stream-manager.js';
 import { AgentExecutor } from '../../agents/agent-executor.js';
 import { AssistantResolver } from '../../agents/assistant-resolver.js';
 import { RequestComposer } from '../../agents/request-composer.js';
+import { reduceChannels } from '../../agents/state-reducer.js';
 import type { AgentResponse, StreamEvent as AgentStreamEvent } from '../../agents/types.js';
 import type { RunStatus, StreamMode } from '../../types/index.js';
 import { generateId } from '../../utils/uuid.util.js';
@@ -740,7 +741,17 @@ export class RunsService {
     const allMessages = [...existingMessages, ...inputMessages, ...responseMessages];
 
     const now = nowISO();
-    const newValues = { ...stateValues, messages: allMessages, ...(agentResponse.state ? { state: agentResponse.state } : {}) };
+    // Fold the agent's returned state into the prior state blob per-channel
+    // (default LastValue) so a partial response retains keys it did not mention.
+    // Agents return a full snapshot today, so this is behavior-equivalent now,
+    // but it makes the persist side partial-update-safe. messages stay a
+    // separate top-level append (above) — not routed through the state reduce.
+    const priorStateBlob = (stateValues['state'] as Record<string, unknown>) ?? {};
+    const newValues = {
+      ...stateValues,
+      messages: allMessages,
+      ...(agentResponse.state ? { state: reduceChannels(priorStateBlob, agentResponse.state) } : {}),
+    };
 
     // Write to state history (used by getState for next run's context)
     await this.threadsRepository.addState(threadId, {

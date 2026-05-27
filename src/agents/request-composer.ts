@@ -7,6 +7,7 @@
  */
 
 import type { AgentRequest, AgentMessage, AgentDocument } from './types.js';
+import { reduceChannels } from './state-reducer.js';
 
 /**
  * Parameters for composing an agent request.
@@ -216,35 +217,39 @@ export class RequestComposer {
   }
 
   /**
-   * Extract state to pass to the agent.
+   * Extract the state to pass to the agent, applying a per-channel merge.
    *
-   * The lg-api does NOT modify the state object. Only the agent is responsible
-   * for maintaining and changing it. The lg-api simply passes the state through:
+   * The agent receives the full accumulated state on every turn, but a client
+   * may re-send only a *partial* `input.state` (e.g. just `{ user_id }`). Rather
+   * than overwriting the stored blob wholesale, lg-api reduces the incoming keys
+   * into the stored `values.state` channel by channel (default `LastValue`):
    *
-   * 1. If the thread has a stored state (from a previous agent response), pass it as-is
-   * 2. If the run input includes an explicit state, pass it as-is (overrides stored state)
+   * 1. If the run input includes an explicit state, merge it over the stored
+   *    state — each key in `input.state` replaces that key, every key absent
+   *    from `input.state` is retained. (This fixes the sibling-wipe regression.)
+   * 2. If the run input has no state, pass the stored state through unchanged.
    *
-   * No merging, no field extraction, no transformation.
+   * The merge is shallow per key (`LastValue`), matching canonical LangGraph: a
+   * caller updating a nested object sends the full sub-object. A full-state reset
+   * is still expressible by sending every key.
    */
   private extractState(
     input: Record<string, unknown>,
     threadState?: Record<string, unknown>,
   ): Record<string, unknown> | undefined {
-    // Explicit state from input takes priority (passed through untouched)
+    const values = threadState?.['values'] as Record<string, unknown> | undefined;
+    const storedState = values?.['state'] as Record<string, unknown> | undefined;
+
+    // Explicit state from input is merged per-channel over the stored state.
     const inputState = input['state'] as Record<string, unknown> | undefined;
     if (inputState && typeof inputState === 'object') {
-      return inputState;
+      return reduceChannels(storedState ?? {}, inputState);
     }
 
-    // Otherwise, pass the stored state from thread (set by a previous agent response).
-    // updateThreadState() spreads agentResponse.state into values, so the stored
-    // state lives at threadState.values.state, not threadState.state.
-    if (threadState) {
-      const values = threadState['values'] as Record<string, unknown> | undefined;
-      const storedState = values?.['state'] as Record<string, unknown> | undefined;
-      if (storedState && typeof storedState === 'object') {
-        return storedState;
-      }
+    // No input state: pass the stored state (set by a previous agent response)
+    // through unchanged. updateThreadState() stores it at values.state.
+    if (storedState && typeof storedState === 'object') {
+      return storedState;
     }
 
     return undefined;

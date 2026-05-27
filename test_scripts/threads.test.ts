@@ -304,6 +304,67 @@ describe('Threads API', () => {
       expect(body.checkpoint).toHaveProperty('checkpoint_id');
       expect(body.checkpoint).toHaveProperty('checkpoint_ns');
     });
+
+    // Behavior change: the manual POST /state path now merges the `state`
+    // sub-object per-channel (replace→merge) like LangGraph's update_state,
+    // instead of replacing values wholesale.
+    it('merges the state sub-object per-channel, retaining siblings', async () => {
+      const { body: created } = await createThread(app);
+
+      // Seed a full state blob.
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { state: { user_id: 'u1', organization_name: 'DEH', amount: 50 } } },
+      });
+
+      // Partial update of the state blob — must NOT wipe siblings.
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { state: { amount: 75 } } },
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/threads/${created.thread_id}/state`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      expect(body.values.state).toEqual({
+        user_id: 'u1',
+        organization_name: 'DEH',
+        amount: 75,
+      });
+    });
+
+    it('still supports a full reset of the state blob by sending every key', async () => {
+      const { body: created } = await createThread(app);
+
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { state: { a: 1, b: 2, c: 3 } } },
+      });
+
+      // Sending all keys (each LastValue) replaces the whole blob's values.
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { state: { a: 10, b: 20, c: 30 } } },
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/threads/${created.thread_id}/state`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.values.state).toEqual({ a: 10, b: 20, c: 30 });
+    });
   });
 
   // -------------------------------------------------------------------------
