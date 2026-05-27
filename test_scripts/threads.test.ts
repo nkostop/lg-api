@@ -304,6 +304,104 @@ describe('Threads API', () => {
       expect(body.checkpoint).toHaveProperty('checkpoint_id');
       expect(body.checkpoint).toHaveProperty('checkpoint_ns');
     });
+
+    // Canonical convention: graph state lives flat at the top level of `values`
+    // (no nested `values.state` blob). The manual POST /state path per-channel
+    // merges the incoming top-level channels over the stored ones — matching the
+    // run path — so a partial update retains siblings instead of wiping them.
+    it('merges top-level state channels per-channel, retaining siblings', async () => {
+      const { body: created } = await createThread(app);
+
+      // Seed a full state at the top level of values.
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { user_id: 'u1', organization_name: 'DEH', amount: 50 } },
+      });
+
+      // Partial update — must NOT wipe siblings.
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { amount: 75 } },
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/threads/${created.thread_id}/state`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = JSON.parse(res.body);
+      // State lives flat in values, not under values.state.
+      expect(body.values).toMatchObject({
+        user_id: 'u1',
+        organization_name: 'DEH',
+        amount: 75,
+      });
+      expect(body.values).not.toHaveProperty('state');
+    });
+
+    it('replaces every named channel when all keys are sent', async () => {
+      const { body: created } = await createThread(app);
+
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { a: 1, b: 2, c: 3 } },
+      });
+
+      // Sending all keys (each LastValue) replaces those channels.
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { a: 10, b: 20, c: 30 } },
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/threads/${created.thread_id}/state`,
+      });
+      const body = JSON.parse(res.body);
+      expect(body.values).toMatchObject({ a: 10, b: 20, c: 30 });
+    });
+
+    // `messages` is the one channel that appends (DEFAULT_CHANNEL_REDUCERS),
+    // emulating LangGraph update_state's add_messages routing — state channels
+    // LastValue-replace, messages accumulate.
+    it('appends messages sent via POST /state instead of replacing them', async () => {
+      const { body: created } = await createThread(app);
+
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { messages: [{ type: 'human', content: 'first' }], step: 1 } },
+      });
+
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { messages: [{ type: 'ai', content: 'second' }], step: 2 } },
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/threads/${created.thread_id}/state`,
+      });
+      const body = JSON.parse(res.body);
+      // messages accumulated across both calls...
+      expect(body.values.messages).toEqual([
+        { type: 'human', content: 'first' },
+        { type: 'ai', content: 'second' },
+      ]);
+      // ...while the `step` state channel LastValue-replaced.
+      expect(body.values.step).toBe(2);
+    });
   });
 
   // -------------------------------------------------------------------------

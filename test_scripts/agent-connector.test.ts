@@ -83,8 +83,37 @@ describe('Request Composer', () => {
   });
 });
 
-describe('Request Composer - State Round-Trip', () => {
-  it('should recover agent state stored inside threadState.values.state', async () => {
+describe('Request Composer - Graph State (canonical convention)', () => {
+  it('treats input keys (minus messages/documents) as graph state', async () => {
+    const composer = new RequestComposer();
+    const request = await composer.composeRequest({
+      threadId: 'thread-1',
+      runId: 'run-1',
+      assistantId: 'asst-1',
+      input: {
+        messages: [{ role: 'user', content: 'Hello' }],
+        step: 'kyc',
+        attempts: 2,
+      },
+    });
+
+    // messages are NOT state; every other input key is.
+    expect(request.state).toEqual({ step: 'kyc', attempts: 2 });
+  });
+
+  it('returns undefined state when input carries only messages', async () => {
+    const composer = new RequestComposer();
+    const request = await composer.composeRequest({
+      threadId: 't1',
+      runId: 'r1',
+      assistantId: 'a1',
+      input: { messages: [{ role: 'user', content: 'Hi' }] },
+    });
+
+    expect(request.state).toBeUndefined();
+  });
+
+  it('inherits thread-state values (minus messages/documents) as state', async () => {
     const composer = new RequestComposer();
     const request = await composer.composeRequest({
       threadId: 'thread-1',
@@ -99,25 +128,23 @@ describe('Request Composer - State Round-Trip', () => {
             { role: 'user', content: 'I want a mortgage' },
             { role: 'assistant', content: 'What is your tax ID?' },
           ],
-          state: {
-            language: 'en',
-            tax_id: '123456789',
-            memory: { collected: { name: 'John' } },
-          },
+          language: 'en',
+          tax_id: '123456789',
+          memory: { collected: { name: 'John' } },
         },
         checkpoint: { thread_id: 'thread-1', checkpoint_ns: '', checkpoint_id: 'cp-1' },
       },
     });
 
-    expect(request.state).toBeDefined();
     expect(request.state).toEqual({
       language: 'en',
       tax_id: '123456789',
       memory: { collected: { name: 'John' } },
     });
+    expect(request.state).not.toHaveProperty('messages');
   });
 
-  it('should NOT include messages in recovered state', async () => {
+  it('never includes documents in the inherited state', async () => {
     const composer = new RequestComposer();
     const request = await composer.composeRequest({
       threadId: 't1',
@@ -127,16 +154,17 @@ describe('Request Composer - State Round-Trip', () => {
       threadState: {
         values: {
           messages: [{ role: 'user', content: 'Previous' }],
-          state: { workflow_step: 3 },
+          documents: [{ id: 'd1', content: 'doc' }],
+          workflow_step: 3,
         },
       },
     });
 
     expect(request.state).toEqual({ workflow_step: 3 });
-    expect(request.state).not.toHaveProperty('messages');
+    expect(request.state).not.toHaveProperty('documents');
   });
 
-  it('should return undefined state when values contains only messages', async () => {
+  it('returns undefined state when thread values hold only messages', async () => {
     const composer = new RequestComposer();
     const request = await composer.composeRequest({
       threadId: 't1',
@@ -153,7 +181,7 @@ describe('Request Composer - State Round-Trip', () => {
     expect(request.state).toBeUndefined();
   });
 
-  it('should prefer explicit input state over stored thread state', async () => {
+  it('lets input keys override inherited thread-state keys (input wins)', async () => {
     const composer = new RequestComposer();
     const request = await composer.composeRequest({
       threadId: 't1',
@@ -161,20 +189,22 @@ describe('Request Composer - State Round-Trip', () => {
       assistantId: 'a1',
       input: {
         messages: [{ role: 'user', content: 'Hi' }],
-        state: { override: true },
+        step: 'verification',
       },
       threadState: {
         values: {
           messages: [],
+          step: 'kyc',
           language: 'en',
         },
       },
     });
 
-    expect(request.state).toEqual({ override: true });
+    // `step` is overridden by input; `language` is inherited (retained).
+    expect(request.state).toEqual({ step: 'verification', language: 'en' });
   });
 
-  it('should handle threadState with no values key', async () => {
+  it('handles threadState with no values key', async () => {
     const composer = new RequestComposer();
     const request = await composer.composeRequest({
       threadId: 't1',
@@ -187,10 +217,10 @@ describe('Request Composer - State Round-Trip', () => {
     expect(request.state).toBeUndefined();
   });
 
-  it('should handle multi-turn state persistence', async () => {
+  it('carries flat graph state across multiple turns', async () => {
     const composer = new RequestComposer();
 
-    // Turn 2: threadState.values.state has agent state from turn 1
+    // Turn 2: thread values carry flat agent state from turn 1.
     const turn2 = await composer.composeRequest({
       threadId: 't1',
       runId: 'r2',
@@ -202,10 +232,8 @@ describe('Request Composer - State Round-Trip', () => {
             { role: 'user', content: 'Start mortgage' },
             { role: 'assistant', content: 'What is your tax ID?' },
           ],
-          state: {
-            workflow_step: 1,
-            collected_fields: ['language'],
-          },
+          workflow_step: 1,
+          collected_fields: ['language'],
         },
       },
     });
@@ -215,7 +243,7 @@ describe('Request Composer - State Round-Trip', () => {
       collected_fields: ['language'],
     });
 
-    // Turn 3: threadState.values.state has updated state from turn 2
+    // Turn 3: thread values carry the updated flat state from turn 2.
     const turn3 = await composer.composeRequest({
       threadId: 't1',
       runId: 'r3',
@@ -229,11 +257,9 @@ describe('Request Composer - State Round-Trip', () => {
             { role: 'user', content: 'My tax ID is 123' },
             { role: 'assistant', content: 'Confirm?' },
           ],
-          state: {
-            workflow_step: 2,
-            collected_fields: ['language', 'tax_id'],
-            tax_id: '123',
-          },
+          workflow_step: 2,
+          collected_fields: ['language', 'tax_id'],
+          tax_id: '123',
         },
       },
     });
@@ -244,15 +270,75 @@ describe('Request Composer - State Round-Trip', () => {
       tax_id: '123',
     });
   });
+
+  it('treats a literal `state` key as a plain channel (legacy callers break loudly)', async () => {
+    const composer = new RequestComposer();
+    const request = await composer.composeRequest({
+      threadId: 't1',
+      runId: 'r1',
+      assistantId: 'a1',
+      input: {
+        messages: [{ role: 'user', content: 'Hi' }],
+        state: { x: 1 },
+      },
+    });
+
+    // No `input.state` special-casing: the nested object lands under a `state`
+    // channel instead of being unwrapped — the documented hard-cut behavior.
+    expect(request.state).toEqual({ state: { x: 1 } });
+  });
+});
+
+describe('Request Composer - Metadata', () => {
+  it('forwards the run metadata param as-is', async () => {
+    const composer = new RequestComposer();
+    const request = await composer.composeRequest({
+      threadId: 't1',
+      runId: 'r1',
+      assistantId: 'a1',
+      input: { messages: [{ role: 'user', content: 'Hi' }] },
+      metadata: { source: 'api', tenant: 'acme' },
+    });
+
+    expect(request.metadata).toEqual({ source: 'api', tenant: 'acme' });
+  });
+
+  it('never derives metadata from input keys', async () => {
+    const composer = new RequestComposer();
+    const request = await composer.composeRequest({
+      threadId: 't1',
+      runId: 'r1',
+      assistantId: 'a1',
+      // `step` is a state channel now, NOT metadata.
+      input: { messages: [{ role: 'user', content: 'Hi' }], step: 'kyc' },
+    });
+
+    expect(request.metadata).toBeUndefined();
+    expect(request.state).toEqual({ step: 'kyc' });
+  });
+
+  it('omits metadata when the param is empty', async () => {
+    const composer = new RequestComposer();
+    const request = await composer.composeRequest({
+      threadId: 't1',
+      runId: 'r1',
+      assistantId: 'a1',
+      input: { messages: [{ role: 'user', content: 'Hi' }] },
+      metadata: {},
+    });
+
+    expect(request.metadata).toBeUndefined();
+  });
 });
 
 /**
- * These tests verify the state boundary: agent state lives at values.state,
- * not spread flat into values. This ensures framework fields in values
- * (like messages) never leak into agent state.
+ * These tests verify the state boundary under the canonical convention: graph
+ * state lives at the TOP LEVEL of `values` (every key except the framework-owned
+ * `messages` / `documents` channels). Framework channels never leak into state,
+ * and a root-level `state` outside `values` is ignored.
  */
 describe('Request Composer - State Boundary Assumptions', () => {
-  it('should only read state from values.state, ignoring loose fields in values', async () => {
+  it('reads all top-level value keys as state, stripping only messages/documents', async () => {
     const composer = new RequestComposer();
     const request = await composer.composeRequest({
       threadId: 't1',
@@ -261,20 +347,20 @@ describe('Request Composer - State Boundary Assumptions', () => {
       input: { messages: [{ role: 'user', content: 'Hi' }] },
       threadState: {
         values: {
-          messages: [{ role: 'user', content: 'Previous' }],
-          workflow_step: 2,    // loose field — NOT agent state
-          language: 'en',      // loose field — NOT agent state
-          state: { step: 3 },  // this IS the agent state
+          messages: [{ role: 'user', content: 'Previous' }],  // framework — stripped
+          documents: [{ id: 'd1', content: 'doc' }],          // framework — stripped
+          workflow_step: 2,                                    // graph state
+          language: 'en',                                      // graph state
         },
       },
     });
 
-    // Only values.state is returned, loose fields are ignored
-    expect(request.state).toEqual({ step: 3 });
+    expect(request.state).toEqual({ workflow_step: 2, language: 'en' });
+    expect(request.state).not.toHaveProperty('messages');
+    expect(request.state).not.toHaveProperty('documents');
   });
 
-  it('should not leak framework fields into agent state', async () => {
-    // Framework fields in values (outside state key) are never passed to the agent.
+  it('returns undefined state when values hold only framework channels', async () => {
     const composer = new RequestComposer();
     const request = await composer.composeRequest({
       threadId: 't1',
@@ -284,19 +370,17 @@ describe('Request Composer - State Boundary Assumptions', () => {
       threadState: {
         values: {
           messages: [{ role: 'user', content: 'Previous' }],
-          _checkpoint_ns: 'abc',
-          _created_at: '2026-03-24T00:00:00Z',
+          documents: [{ id: 'd1', content: 'doc' }],
         },
       },
     });
 
-    // No values.state key → no state passed to agent
     expect(request.state).toBeUndefined();
   });
 
-  it('should read from values.state even when threadState.state exists at root', async () => {
-    // updateThreadState writes into values.state, not at the root.
-    // values.state is the authoritative source.
+  it('ignores a root-level `state` outside `values`', async () => {
+    // Graph state is read only from threadState.values; a sibling `state` at the
+    // root of threadState is not a value channel and must be ignored.
     const composer = new RequestComposer();
     const request = await composer.composeRequest({
       threadId: 't1',
@@ -307,7 +391,7 @@ describe('Request Composer - State Boundary Assumptions', () => {
         state: { workflow_step: 5 },          // root-level — ignored
         values: {
           messages: [],
-          state: { workflow_step: 10 },        // values.state — authoritative
+          workflow_step: 10,                   // values channel — authoritative
         },
       },
     });

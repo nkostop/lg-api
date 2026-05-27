@@ -19,6 +19,7 @@ import { StreamManager } from '../../streaming/stream-manager.js';
 import { AgentExecutor } from '../../agents/agent-executor.js';
 import { AssistantResolver } from '../../agents/assistant-resolver.js';
 import { RequestComposer } from '../../agents/request-composer.js';
+import { reduceChannels } from '../../agents/state-reducer.js';
 import type { AgentResponse, StreamEvent as AgentStreamEvent } from '../../agents/types.js';
 import type { RunStatus, StreamMode } from '../../types/index.js';
 import { generateId } from '../../utils/uuid.util.js';
@@ -112,6 +113,7 @@ export class RunsService {
           assistantId: assistant.assistant_id,
           input: (request.input as Record<string, unknown>) ?? {},
           threadState: currentState,
+          metadata: request.metadata ?? {},
         });
 
         // Set run to running
@@ -195,6 +197,7 @@ export class RunsService {
           runId: run.run_id,
           assistantId: assistant.assistant_id,
           input: (request.input as Record<string, unknown>) ?? {},
+          metadata: request.metadata ?? {},
         });
 
         await this.runsRepository.update(run.run_id, {
@@ -458,6 +461,7 @@ export class RunsService {
         assistantId: assistant.assistant_id,
         input: (request.input as Record<string, unknown>) ?? {},
         threadState: threadId ? currentState : undefined,
+        metadata: request.metadata ?? {},
       });
 
       // Set run to running
@@ -589,6 +593,7 @@ export class RunsService {
         assistantId: assistant.assistant_id,
         input: (request.input as Record<string, unknown>) ?? {},
         threadState: threadId ? currentState : undefined,
+        metadata: request.metadata ?? {},
       });
 
       // Set run to running
@@ -740,7 +745,21 @@ export class RunsService {
     const allMessages = [...existingMessages, ...inputMessages, ...responseMessages];
 
     const now = nowISO();
-    const newValues = { ...stateValues, messages: allMessages, ...(agentResponse.state ? { state: agentResponse.state } : {}) };
+    // Persist the agent's returned state at the **top level** of `values`
+    // (LangGraph's canonical "input keys = graph state" convention), so it
+    // round-trips as inherited state on the next run's compose. The agent
+    // returns a full snapshot today; folding it into the prior top-level
+    // `values` per-channel (default LastValue) keeps the persist side
+    // partial-update-safe — a key the response omits is retained, not wiped.
+    // `messages` stay a separate manual append (above) and overwrite last;
+    // they are never routed through the state reduce.
+    const reducedValues = agentResponse.state
+      ? reduceChannels(stateValues, agentResponse.state)
+      : { ...stateValues };
+    const newValues = {
+      ...reducedValues,
+      messages: allMessages,
+    };
 
     // Write to state history (used by getState for next run's context)
     await this.threadsRepository.addState(threadId, {

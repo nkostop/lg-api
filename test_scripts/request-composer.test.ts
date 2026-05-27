@@ -177,4 +177,78 @@ describe('RequestComposer', () => {
       expect(result.messages).toEqual([]);
     });
   });
+
+  describe('state per-channel merge (flat canonical convention)', () => {
+    // Graph state lives at the top level of values; input keys merge on top
+    // per-channel (LastValue). messages/documents are stripped.
+    const storedThreadState = {
+      values: {
+        user_id: 'u1',
+        organization_name: 'DEH',
+        payment_code: 'ABC123',
+        amount: 50,
+      },
+    };
+
+    it('merges partial input keys over inherited state, retaining siblings', async () => {
+      const result = await composer.composeRequest({
+        ...baseParams,
+        input: { user_id: 'u2' },
+        threadState: storedThreadState,
+      });
+      // Only user_id changed; every sibling key was retained (the wipe fix).
+      expect(result.state).toEqual({
+        user_id: 'u2',
+        organization_name: 'DEH',
+        payment_code: 'ABC123',
+        amount: 50,
+      });
+    });
+
+    it('applies a full input (every key sent) as a replacement', async () => {
+      const full = {
+        user_id: 'u3',
+        organization_name: 'EYDAP',
+        payment_code: 'XYZ789',
+        amount: 99,
+      };
+      const result = await composer.composeRequest({
+        ...baseParams,
+        input: full,
+        threadState: storedThreadState,
+      });
+      expect(result.state).toEqual(full);
+    });
+
+    it('passes inherited state through unchanged when input has no state keys', async () => {
+      const result = await composer.composeRequest({
+        ...baseParams,
+        input: { messages: [{ role: 'user', content: 'next step' }] },
+        threadState: storedThreadState,
+      });
+      expect(result.state).toEqual(storedThreadState.values);
+    });
+
+    it('merges partial input keys over empty inherited state', async () => {
+      const result = await composer.composeRequest({
+        ...baseParams,
+        input: { user_id: 'u1' },
+        threadState: { values: {} },
+      });
+      expect(result.state).toEqual({ user_id: 'u1' });
+    });
+
+    it('does not mutate the stored thread state', async () => {
+      const threadState = {
+        values: { user_id: 'u1', amount: 50 },
+      };
+      const snapshot = JSON.parse(JSON.stringify(threadState));
+      await composer.composeRequest({
+        ...baseParams,
+        input: { amount: 75 },
+        threadState,
+      });
+      expect(threadState).toEqual(snapshot);
+    });
+  });
 });

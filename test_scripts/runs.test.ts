@@ -62,6 +62,28 @@ function createMockAgentExecutor(): AgentExecutor {
   } as unknown as AgentExecutor;
 }
 
+/**
+ * Mock AgentExecutor that echoes the request's state back as a full snapshot,
+ * mirroring how the deployed payments-agent returns the whole turn.state. Lets
+ * us assert the per-channel merge across the input-compose + persist sites.
+ */
+function createStateEchoAgentExecutor(): AgentExecutor {
+  return {
+    execute: async (_graphId: string, request: any) => ({
+      thread_id: request.thread_id,
+      run_id: request.run_id,
+      messages: [{ role: 'assistant', content: 'ok' }],
+      // The agent receives the (already-merged) state and returns it verbatim
+      // as the full snapshot — exactly the payments-agent contract.
+      ...(request.state ? { state: request.state } : {}),
+    }),
+    stream: async function* (_graphId: string, request: any) {
+      yield { event: 'metadata', data: { run_id: request.run_id, thread_id: request.thread_id } };
+      yield { event: 'end', data: null };
+    },
+  } as unknown as AgentExecutor;
+}
+
 let app: FastifyInstance;
 let threadsService: ThreadsService;
 
@@ -69,7 +91,9 @@ let threadsService: ThreadsService;
  * Build a test app with shared ThreadsRepository so that threads created
  * via the threads endpoint are visible to the runs service.
  */
-async function buildRunsTestApp(): Promise<FastifyInstance> {
+async function buildRunsTestApp(
+  agentExecutor: AgentExecutor = createMockAgentExecutor(),
+): Promise<FastifyInstance> {
   const instance = Fastify({ logger: false }).withTypeProvider<TypeBoxTypeProvider>();
   instance.decorate('config', config);
 
@@ -83,7 +107,7 @@ async function buildRunsTestApp(): Promise<FastifyInstance> {
   // Create shared repositories
   const sharedThreadsRepo = new ThreadsRepository();
   const runsRepo = new RunsRepository();
-  const mockAgentExecutor = createMockAgentExecutor();
+  const mockAgentExecutor = agentExecutor;
   const mockAssistantResolver = createMockAssistantResolver();
   const requestComposer = new RequestComposer();
   const runsService = new RunsService(runsRepo, sharedThreadsRepo, mockAgentExecutor, mockAssistantResolver, requestComposer);
@@ -585,6 +609,77 @@ describe('Runs API', () => {
       });
 
       expect(res.statusCode).toBe(204);
+    });
+  });
+
+  // -------------------------------------------------------------------
+  // Per-channel state merge across the run path (the wipe-fix)
+  // -------------------------------------------------------------------
+  describe('thread state per-channel merge (flat canonical convention)', () => {
+    beforeEach(async () => {
+      // Use a state-echoing executor so the persisted state reflects the merge.
+      app = await buildRunsTestApp(createStateEchoAgentExecutor());
+    });
+
+    it('persists a full snapshot returned by the agent at the top level of values', async () => {
+      const threadId = await createThread();
+      const fullState = { user_id: 'u1', organization_name: 'DEH', amount: 50 };
+
+      const res = await app.inject({
+        method: 'POST',
+        url: `/threads/${threadId}/runs/wait`,
+        payload: {
+          assistant_id: randomUUID(),
+          // Graph state = input keys other than messages/documents.
+          input: { messages: [{ role: 'user', content: 'start' }], ...fullState },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+
+      const state = await threadsService.getState(threadId);
+      // State now lives flat in values (alongside messages), not under values.state.
+      expect(state.values).toMatchObject(fullState);
+      expect(state.values).not.toHaveProperty('state');
+    });
+
+    it('retains prior keys when a later turn sends only partial input keys', async () => {
+      const threadId = await createThread();
+
+      // Turn 1: seed the full state.
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${threadId}/runs/wait`,
+        payload: {
+          assistant_id: randomUUID(),
+          input: {
+            messages: [{ role: 'user', content: 'start' }],
+            user_id: 'u1',
+            organization_name: 'DEH',
+            amount: 50,
+          },
+        },
+      });
+
+      // Turn 2: send only a partial state — must NOT wipe siblings.
+      const res = await app.inject({
+        method: 'POST',
+        url: `/threads/${threadId}/runs/wait`,
+        payload: {
+          assistant_id: randomUUID(),
+          input: {
+            messages: [{ role: 'user', content: 'change amount' }],
+            amount: 75,
+          },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+
+      const state = await threadsService.getState(threadId);
+      expect(state.values).toMatchObject({
+        user_id: 'u1',
+        organization_name: 'DEH',
+        amount: 75,
+      });
     });
   });
 });

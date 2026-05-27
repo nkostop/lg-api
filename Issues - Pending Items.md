@@ -44,6 +44,12 @@
 - **Severity**: Low
 - **Recommendation**: Add the route when needed for SDK compatibility testing.
 
+### P11 - `POST /state` message append lacks `add_messages` id-dedup / RemoveMessages fidelity
+- **Files**: `src/modules/threads/threads.service.ts` (`updateState`), `src/agents/state-reducer.ts` (`append`)
+- **Description**: `POST /threads/:id/state` now appends `messages` via the `append` channel reducer (`DEFAULT_CHANNEL_REDUCERS`), matching LangGraph `update_state`'s reducer routing (state channels still `LastValue`, siblings retained). But `append` is a plain array concat — it does not dedupe/merge by message `id`, nor honor `RemoveMessages`, the way LangGraph's `add_messages` reducer does. A caller that re-sends a message with an existing `id` double-adds it instead of replacing in place. The run path's hand-rolled 3-way concat (`runs.service.updateThreadState`) has the same limitation.
+- **Severity**: Low
+- **Recommendation**: Only if clients edit/replay messages through `POST /state` or runs — upgrade `append` (or add a dedicated `add_messages`-style reducer) to merge-by-`id` and process `RemoveMessages`, and apply the same reducer to both the manual and run paths. Until then, append + sibling-retention is the documented, intentional behavior.
+
 ### P9 - Configuration exception: STORAGE_CONFIG_PATH defaults to file-existence detection
 - **File**: `src/storage/yaml-config-loader.ts`
 - **Description**: Per project rules, no fallback values are permitted for configuration. However, the storage system needs a way to work without a config file (defaulting to in-memory provider). The approach is: if `STORAGE_CONFIG_PATH` env var is not set, the loader checks if `storage-config.yaml` exists at the project root. If the file exists, it is loaded. If neither the env var nor the file exist, the system defaults to the in-memory provider. This is file-existence detection, not a config fallback -- documented as a deliberate exception per the storage infrastructure design.
@@ -54,6 +60,18 @@
 ---
 
 ## Completed Items
+
+### P10 — Manual `POST /state` flattened to match the canonical convention (divergence closed)
+- **Date**: 2026-05-27
+- **Files**: `src/modules/threads/threads.service.ts` (`updateState`), `test_scripts/threads.test.ts`, `docs/design/project-design.md`
+- **Issue**: After `LG-STATE-CANONICAL` flattened the run path, `threads.service.updateState` still special-cased a **nested** `values.state` blob (spread `params.values`, then per-channel merge an incoming `values.state` over the stored one). A legacy nested `POST /state` (`{ values: { state: {…} } }`) therefore wrote a literal `state` channel that the run composer surfaced to the agent as `{ state: {…} }` (double-nested) — inconsistent with the flat model. It also wiped sibling channels for flat top-level keys (it spread only `params.values`, not the stored values).
+- **Fix**: `updateState` now does `reduceChannels(currentValues, params.values)` — a per-channel `LastValue` merge at the **top level** of `values`, matching `runs.service.updateThreadState`. A partial `POST /state` replaces only the channels it names and retains every sibling (including `messages`); the nested `values.state` special-case is gone. Rewrote the two `threads.test.ts` cases that asserted `body.values.state` to the flat shape (assert `body.values` via `toMatchObject` + `not.toHaveProperty('state')`). `npx tsc --noEmit` clean; full suite green except the pre-existing unrelated `skill-agent.test.ts` failures (missing `agents/skill-agent/node_modules`). Every write path (run input → agent, agent → storage, manual `POST /state`) is now consistent and flat. (ADR-0001 is left as the append-only historical record of the original nested per-channel decision; this flatten supersedes it and is recorded here + in `project-design.md`.)
+
+### LG-STATE-CANONICAL — Aligned run state passing with LangGraph "input keys = graph state" convention
+- **Date**: 2026-05-27
+- **Files**: `src/agents/request-composer.ts`, `src/modules/runs/runs.service.ts`, `test_scripts/agent-connector.test.ts`, `test_scripts/request-composer.test.ts`, `test_scripts/runs.test.ts`, `docs/design/project-design.md`
+- **Issue**: lg-api carried a proprietary `input.state` extension. `RequestComposer.extractState` unwrapped an explicit `input.state` (per-channel merging it over the nested `threadState.values.state` blob) and `extractMetadata` spilled every other `input` key into `metadata`; `runs.service.updateThreadState` persisted the agent's returned state nested under `values.state`. This diverged from the canonical LangGraph contract where the run **input itself is the graph state** (every key other than `messages`/`documents`), which broke drop-in parity for SDK clients that send state as flat top-level input keys.
+- **Fix (hard cut)**: Removed the `input.state` special-case and `extractMetadata`. `extractState` now inherits the top-level keys of `threadState.values` (minus `messages`/`documents`), folds the input's top-level state keys on top per-channel via the shared `reduceChannels` engine (input wins, omitted siblings retained), and returns `undefined` when empty. `composeRequest` takes a `metadata` param forwarded as-is; all four call sites in `runs.service.ts` pass `metadata: request.metadata ?? {}`. `updateThreadState` now folds `agentResponse.state` into the **top level** of `values` (per-channel), so it round-trips as inherited state next run; `messages` stay a separate manual append. A literal `state` input key is now just a channel — legacy `input.state` callers break loudly, by design. Rewrote the state tests in `agent-connector.test.ts`, `request-composer.test.ts`, and `runs.test.ts` to the flat convention (input keys → state, inherited values → state, input override, top-level `metadata` forwarded). Updated the "Graph state" section of `project-design.md`. `npx tsc --noEmit` clean; full suite green except the pre-existing `skill-agent.test.ts` failures (missing `agents/skill-agent/node_modules`, unrelated). Follow-up divergence on the manual `POST /state` path tracked as P10.
 
 ### C7 - Run creation ignored `if_not_exists` and always 404'd on missing thread
 - **Files**: `src/modules/runs/runs.service.ts`, `test_scripts/runs.test.ts`
