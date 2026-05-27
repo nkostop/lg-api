@@ -615,13 +615,13 @@ describe('Runs API', () => {
   // -------------------------------------------------------------------
   // Per-channel state merge across the run path (the wipe-fix)
   // -------------------------------------------------------------------
-  describe('thread state per-channel merge', () => {
+  describe('thread state per-channel merge (flat canonical convention)', () => {
     beforeEach(async () => {
       // Use a state-echoing executor so the persisted state reflects the merge.
       app = await buildRunsTestApp(createStateEchoAgentExecutor());
     });
 
-    it('persists a full snapshot returned by the agent', async () => {
+    it('persists a full snapshot returned by the agent at the top level of values', async () => {
       const threadId = await createThread();
       const fullState = { user_id: 'u1', organization_name: 'DEH', amount: 50 };
 
@@ -630,16 +630,19 @@ describe('Runs API', () => {
         url: `/threads/${threadId}/runs/wait`,
         payload: {
           assistant_id: randomUUID(),
-          input: { messages: [{ role: 'user', content: 'start' }], state: fullState },
+          // Graph state = input keys other than messages/documents.
+          input: { messages: [{ role: 'user', content: 'start' }], ...fullState },
         },
       });
       expect(res.statusCode).toBe(200);
 
       const state = await threadsService.getState(threadId);
-      expect(state.values.state).toEqual(fullState);
+      // State now lives flat in values (alongside messages), not under values.state.
+      expect(state.values).toMatchObject(fullState);
+      expect(state.values).not.toHaveProperty('state');
     });
 
-    it('retains prior keys when a later turn sends only a partial input.state', async () => {
+    it('retains prior keys when a later turn sends only partial input keys', async () => {
       const threadId = await createThread();
 
       // Turn 1: seed the full state.
@@ -650,7 +653,9 @@ describe('Runs API', () => {
           assistant_id: randomUUID(),
           input: {
             messages: [{ role: 'user', content: 'start' }],
-            state: { user_id: 'u1', organization_name: 'DEH', amount: 50 },
+            user_id: 'u1',
+            organization_name: 'DEH',
+            amount: 50,
           },
         },
       });
@@ -663,14 +668,14 @@ describe('Runs API', () => {
           assistant_id: randomUUID(),
           input: {
             messages: [{ role: 'user', content: 'change amount' }],
-            state: { amount: 75 },
+            amount: 75,
           },
         },
       });
       expect(res.statusCode).toBe(200);
 
       const state = await threadsService.getState(threadId);
-      expect(state.values.state).toEqual({
+      expect(state.values).toMatchObject({
         user_id: 'u1',
         organization_name: 'DEH',
         amount: 75,

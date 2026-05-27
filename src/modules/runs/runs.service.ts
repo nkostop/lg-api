@@ -113,6 +113,7 @@ export class RunsService {
           assistantId: assistant.assistant_id,
           input: (request.input as Record<string, unknown>) ?? {},
           threadState: currentState,
+          metadata: request.metadata ?? {},
         });
 
         // Set run to running
@@ -196,6 +197,7 @@ export class RunsService {
           runId: run.run_id,
           assistantId: assistant.assistant_id,
           input: (request.input as Record<string, unknown>) ?? {},
+          metadata: request.metadata ?? {},
         });
 
         await this.runsRepository.update(run.run_id, {
@@ -459,6 +461,7 @@ export class RunsService {
         assistantId: assistant.assistant_id,
         input: (request.input as Record<string, unknown>) ?? {},
         threadState: threadId ? currentState : undefined,
+        metadata: request.metadata ?? {},
       });
 
       // Set run to running
@@ -590,6 +593,7 @@ export class RunsService {
         assistantId: assistant.assistant_id,
         input: (request.input as Record<string, unknown>) ?? {},
         threadState: threadId ? currentState : undefined,
+        metadata: request.metadata ?? {},
       });
 
       // Set run to running
@@ -741,16 +745,20 @@ export class RunsService {
     const allMessages = [...existingMessages, ...inputMessages, ...responseMessages];
 
     const now = nowISO();
-    // Fold the agent's returned state into the prior state blob per-channel
-    // (default LastValue) so a partial response retains keys it did not mention.
-    // Agents return a full snapshot today, so this is behavior-equivalent now,
-    // but it makes the persist side partial-update-safe. messages stay a
-    // separate top-level append (above) — not routed through the state reduce.
-    const priorStateBlob = (stateValues['state'] as Record<string, unknown>) ?? {};
+    // Persist the agent's returned state at the **top level** of `values`
+    // (LangGraph's canonical "input keys = graph state" convention), so it
+    // round-trips as inherited state on the next run's compose. The agent
+    // returns a full snapshot today; folding it into the prior top-level
+    // `values` per-channel (default LastValue) keeps the persist side
+    // partial-update-safe — a key the response omits is retained, not wiped.
+    // `messages` stay a separate manual append (above) and overwrite last;
+    // they are never routed through the state reduce.
+    const reducedValues = agentResponse.state
+      ? reduceChannels(stateValues, agentResponse.state)
+      : { ...stateValues };
     const newValues = {
-      ...stateValues,
+      ...reducedValues,
       messages: allMessages,
-      ...(agentResponse.state ? { state: reduceChannels(priorStateBlob, agentResponse.state) } : {}),
     };
 
     // Write to state history (used by getState for next run's context)

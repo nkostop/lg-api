@@ -178,22 +178,22 @@ describe('RequestComposer', () => {
     });
   });
 
-  describe('state per-channel merge', () => {
+  describe('state per-channel merge (flat canonical convention)', () => {
+    // Graph state lives at the top level of values; input keys merge on top
+    // per-channel (LastValue). messages/documents are stripped.
     const storedThreadState = {
       values: {
-        state: {
-          user_id: 'u1',
-          organization_name: 'DEH',
-          payment_code: 'ABC123',
-          amount: 50,
-        },
+        user_id: 'u1',
+        organization_name: 'DEH',
+        payment_code: 'ABC123',
+        amount: 50,
       },
     };
 
-    it('merges a partial input.state over stored state, retaining siblings', async () => {
+    it('merges partial input keys over inherited state, retaining siblings', async () => {
       const result = await composer.composeRequest({
         ...baseParams,
-        input: { state: { user_id: 'u2' } },
+        input: { user_id: 'u2' },
         threadState: storedThreadState,
       });
       // Only user_id changed; every sibling key was retained (the wipe fix).
@@ -205,7 +205,7 @@ describe('RequestComposer', () => {
       });
     });
 
-    it('still applies a full input.state (every key sent) as a replacement', async () => {
+    it('applies a full input (every key sent) as a replacement', async () => {
       const full = {
         user_id: 'u3',
         organization_name: 'EYDAP',
@@ -214,25 +214,25 @@ describe('RequestComposer', () => {
       };
       const result = await composer.composeRequest({
         ...baseParams,
-        input: { state: full },
+        input: full,
         threadState: storedThreadState,
       });
       expect(result.state).toEqual(full);
     });
 
-    it('passes stored state through unchanged when input.state is absent', async () => {
+    it('passes inherited state through unchanged when input has no state keys', async () => {
       const result = await composer.composeRequest({
         ...baseParams,
         input: { messages: [{ role: 'user', content: 'next step' }] },
         threadState: storedThreadState,
       });
-      expect(result.state).toEqual(storedThreadState.values.state);
+      expect(result.state).toEqual(storedThreadState.values);
     });
 
-    it('merges a partial input.state over an empty stored state', async () => {
+    it('merges partial input keys over empty inherited state', async () => {
       const result = await composer.composeRequest({
         ...baseParams,
-        input: { state: { user_id: 'u1' } },
+        input: { user_id: 'u1' },
         threadState: { values: {} },
       });
       expect(result.state).toEqual({ user_id: 'u1' });
@@ -240,12 +240,12 @@ describe('RequestComposer', () => {
 
     it('does not mutate the stored thread state', async () => {
       const threadState = {
-        values: { state: { user_id: 'u1', amount: 50 } },
+        values: { user_id: 'u1', amount: 50 },
       };
       const snapshot = JSON.parse(JSON.stringify(threadState));
       await composer.composeRequest({
         ...baseParams,
-        input: { state: { amount: 75 } },
+        input: { amount: 75 },
         threadState,
       });
       expect(threadState).toEqual(snapshot);

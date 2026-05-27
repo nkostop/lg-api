@@ -305,26 +305,27 @@ describe('Threads API', () => {
       expect(body.checkpoint).toHaveProperty('checkpoint_ns');
     });
 
-    // Behavior change: the manual POST /state path now merges the `state`
-    // sub-object per-channel (replace→merge) like LangGraph's update_state,
-    // instead of replacing values wholesale.
-    it('merges the state sub-object per-channel, retaining siblings', async () => {
+    // Canonical convention: graph state lives flat at the top level of `values`
+    // (no nested `values.state` blob). The manual POST /state path per-channel
+    // merges the incoming top-level channels over the stored ones — matching the
+    // run path — so a partial update retains siblings instead of wiping them.
+    it('merges top-level state channels per-channel, retaining siblings', async () => {
       const { body: created } = await createThread(app);
 
-      // Seed a full state blob.
+      // Seed a full state at the top level of values.
       await app.inject({
         method: 'POST',
         url: `/threads/${created.thread_id}/state`,
         headers: { 'content-type': 'application/json' },
-        payload: { values: { state: { user_id: 'u1', organization_name: 'DEH', amount: 50 } } },
+        payload: { values: { user_id: 'u1', organization_name: 'DEH', amount: 50 } },
       });
 
-      // Partial update of the state blob — must NOT wipe siblings.
+      // Partial update — must NOT wipe siblings.
       await app.inject({
         method: 'POST',
         url: `/threads/${created.thread_id}/state`,
         headers: { 'content-type': 'application/json' },
-        payload: { values: { state: { amount: 75 } } },
+        payload: { values: { amount: 75 } },
       });
 
       const res = await app.inject({
@@ -333,29 +334,31 @@ describe('Threads API', () => {
       });
       expect(res.statusCode).toBe(200);
       const body = JSON.parse(res.body);
-      expect(body.values.state).toEqual({
+      // State lives flat in values, not under values.state.
+      expect(body.values).toMatchObject({
         user_id: 'u1',
         organization_name: 'DEH',
         amount: 75,
       });
+      expect(body.values).not.toHaveProperty('state');
     });
 
-    it('still supports a full reset of the state blob by sending every key', async () => {
+    it('replaces every named channel when all keys are sent', async () => {
       const { body: created } = await createThread(app);
 
       await app.inject({
         method: 'POST',
         url: `/threads/${created.thread_id}/state`,
         headers: { 'content-type': 'application/json' },
-        payload: { values: { state: { a: 1, b: 2, c: 3 } } },
+        payload: { values: { a: 1, b: 2, c: 3 } },
       });
 
-      // Sending all keys (each LastValue) replaces the whole blob's values.
+      // Sending all keys (each LastValue) replaces those channels.
       await app.inject({
         method: 'POST',
         url: `/threads/${created.thread_id}/state`,
         headers: { 'content-type': 'application/json' },
-        payload: { values: { state: { a: 10, b: 20, c: 30 } } },
+        payload: { values: { a: 10, b: 20, c: 30 } },
       });
 
       const res = await app.inject({
@@ -363,7 +366,41 @@ describe('Threads API', () => {
         url: `/threads/${created.thread_id}/state`,
       });
       const body = JSON.parse(res.body);
-      expect(body.values.state).toEqual({ a: 10, b: 20, c: 30 });
+      expect(body.values).toMatchObject({ a: 10, b: 20, c: 30 });
+    });
+
+    // `messages` is the one channel that appends (DEFAULT_CHANNEL_REDUCERS),
+    // emulating LangGraph update_state's add_messages routing — state channels
+    // LastValue-replace, messages accumulate.
+    it('appends messages sent via POST /state instead of replacing them', async () => {
+      const { body: created } = await createThread(app);
+
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { messages: [{ type: 'human', content: 'first' }], step: 1 } },
+      });
+
+      await app.inject({
+        method: 'POST',
+        url: `/threads/${created.thread_id}/state`,
+        headers: { 'content-type': 'application/json' },
+        payload: { values: { messages: [{ type: 'ai', content: 'second' }], step: 2 } },
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: `/threads/${created.thread_id}/state`,
+      });
+      const body = JSON.parse(res.body);
+      // messages accumulated across both calls...
+      expect(body.values.messages).toEqual([
+        { type: 'human', content: 'first' },
+        { type: 'ai', content: 'second' },
+      ]);
+      // ...while the `step` state channel LastValue-replaced.
+      expect(body.values.step).toBe(2);
     });
   });
 

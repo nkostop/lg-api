@@ -18,6 +18,12 @@ export interface ComposeRequestParams {
   assistantId: string;
   input: Record<string, unknown>;
   threadState?: Record<string, unknown>;
+  /**
+   * The run's own metadata, forwarded to the agent as-is. Metadata is never
+   * derived from `input` keys — under the canonical convention those keys are
+   * graph state, not metadata.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 export class RequestComposer {
@@ -31,7 +37,7 @@ export class RequestComposer {
    * 4. Extract documents from input.documents (if present)
    */
   async composeRequest(params: ComposeRequestParams): Promise<AgentRequest> {
-    const { threadId, runId, assistantId, input, threadState } = params;
+    const { threadId, runId, assistantId, input, threadState, metadata } = params;
 
     const messages: AgentMessage[] = [];
 
@@ -48,11 +54,9 @@ export class RequestComposer {
     // 3. Gather documents from run input
     const documents = this.extractDocumentsFromInput(input);
 
-    // 4. Gather state from thread state and/or input
+    // 4. Gather graph state from thread state and input (canonical convention:
+    //    every key other than messages/documents IS a graph-state channel).
     const state = this.extractState(input, threadState);
-
-    // 5. Gather metadata from run input
-    const metadata = this.extractMetadata(input);
 
     const request: AgentRequest = {
       thread_id: threadId,
@@ -69,7 +73,9 @@ export class RequestComposer {
       request.state = state;
     }
 
-    if (Object.keys(metadata).length > 0) {
+    // 5. Forward the run's metadata as-is (supplied by the caller, never
+    //    derived from input keys).
+    if (metadata && Object.keys(metadata).length > 0) {
       request.metadata = metadata;
     }
 
@@ -217,54 +223,51 @@ export class RequestComposer {
   }
 
   /**
-   * Extract the state to pass to the agent, applying a per-channel merge.
+   * Extract the graph state to pass to the agent, following LangGraph's
+   * canonical "the input *is* the state" convention.
    *
-   * The agent receives the full accumulated state on every turn, but a client
-   * may re-send only a *partial* `input.state` (e.g. just `{ user_id }`). Rather
-   * than overwriting the stored blob wholesale, lg-api reduces the incoming keys
-   * into the stored `values.state` channel by channel (default `LastValue`):
+   * The graph state lives at the **top level** of `threadState.values` (minus
+   * the framework-owned `messages` and `documents` channels). A run's `input`
+   * carries state updates the same way — any key other than `messages` /
+   * `documents` is a state channel.
    *
-   * 1. If the run input includes an explicit state, merge it over the stored
-   *    state — each key in `input.state` replaces that key, every key absent
-   *    from `input.state` is retained. (This fixes the sibling-wipe regression.)
-   * 2. If the run input has no state, pass the stored state through unchanged.
+   * Resolution (per-channel `LastValue`, via the shared reduce engine):
+   * 1. Inherit the stored state = `values` minus `messages`/`documents`.
+   * 2. Fold the input's state keys on top — each input key replaces that
+   *    channel; every inherited key the input omits is retained (the
+   *    sibling-wipe fix, now at the flattened top level).
+   * 3. Return `undefined` when the merged state is empty.
    *
-   * The merge is shallow per key (`LastValue`), matching canonical LangGraph: a
-   * caller updating a nested object sends the full sub-object. A full-state reset
-   * is still expressible by sending every key.
+   * There is no `input.state` special-casing: a literal `state` key is just
+   * another channel, so a legacy caller that nested under `input.state` now
+   * sees `{ state: {...} }` and breaks loudly — by design.
    */
   private extractState(
     input: Record<string, unknown>,
     threadState?: Record<string, unknown>,
   ): Record<string, unknown> | undefined {
-    const values = threadState?.['values'] as Record<string, unknown> | undefined;
-    const storedState = values?.['state'] as Record<string, unknown> | undefined;
+    const values = (threadState?.['values'] as Record<string, unknown>) ?? {};
+    const inheritedState = this.stripReservedChannels(values);
+    const inputState = this.stripReservedChannels(input);
 
-    // Explicit state from input is merged per-channel over the stored state.
-    const inputState = input['state'] as Record<string, unknown> | undefined;
-    if (inputState && typeof inputState === 'object') {
-      return reduceChannels(storedState ?? {}, inputState);
-    }
-
-    // No input state: pass the stored state (set by a previous agent response)
-    // through unchanged. updateThreadState() stores it at values.state.
-    if (storedState && typeof storedState === 'object') {
-      return storedState;
-    }
-
-    return undefined;
+    const merged = reduceChannels(inheritedState, inputState);
+    return Object.keys(merged).length > 0 ? merged : undefined;
   }
 
   /**
-   * Extract metadata from run input (everything except messages, documents, and state).
+   * Strip the framework-owned channels (`messages`, `documents`) from a record,
+   * leaving only graph-state channels. Returns a shallow copy — never mutates
+   * the input.
    */
-  private extractMetadata(input: Record<string, unknown>): Record<string, unknown> {
-    const metadata: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(input)) {
-      if (key !== 'messages' && key !== 'documents' && key !== 'state') {
-        metadata[key] = value;
+  private stripReservedChannels(
+    record: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(record)) {
+      if (key !== 'messages' && key !== 'documents') {
+        result[key] = value;
       }
     }
-    return metadata;
+    return result;
   }
 }

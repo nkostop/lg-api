@@ -10,7 +10,7 @@ import type { SearchOptions, SearchResult } from '../../repositories/interfaces.
 import { ApiError } from '../../errors/api-error.js';
 import { generateId } from '../../utils/uuid.util.js';
 import { nowISO } from '../../utils/date.util.js';
-import { reduceChannels } from '../../agents/state-reducer.js';
+import { reduceChannels, DEFAULT_CHANNEL_REDUCERS } from '../../agents/state-reducer.js';
 
 export interface CreateThreadParams {
   metadata?: Record<string, unknown>;
@@ -293,22 +293,22 @@ export class ThreadsService {
     const currentState = await this.repository.getState(threadId);
     const parentCheckpoint = currentState?.checkpoint ?? null;
 
-    // Per-channel merge for the nested `state` blob: incoming `values.state`
-    // keys are reduced (default LastValue) over the existing thread's
-    // `values.state`, so a partial manual update retains sibling keys instead
-    // of wiping them. Every other top-level `values` key (e.g. messages) is
-    // passed through as given. This makes POST /state behave like LangGraph's
-    // reducer-routed update_state; a deliberate full reset of the state blob is
-    // still expressible by sending every key.
+    // Per-channel merge at the top level of `values`, emulating LangGraph's
+    // reducer-routed `update_state` (the same flat model the run path uses).
+    // `DEFAULT_CHANNEL_REDUCERS` is the single declared channel policy: `messages`
+    // append (canonical `add_messages` shape), every other channel is `LastValue`.
+    // So a partial manual update appends any messages it sends, replaces the state
+    // channels it names, and retains every channel it omits (siblings are never
+    // wiped). A deliberate state reset is still expressible by sending every state
+    // channel. There is no nested `values.state` blob — graph state lives flat at
+    // the top level, exactly as `runs.service.updateThreadState` persists it.
+    //
+    // NOTE: `append` is a plain concat — it does NOT dedupe/merge by message `id`
+    // or honor `RemoveMessages` like a full `add_messages`. Re-sending a message
+    // via POST /state double-adds it. Full add_messages fidelity is a separate,
+    // deferred parity item (see Issues - Pending Items.md, P11).
     const currentValues = (currentState?.values as Record<string, unknown> | undefined) ?? {};
-    const currentStateBlob = (currentValues['state'] as Record<string, unknown>) ?? {};
-    const incomingStateBlob = params.values['state'] as Record<string, unknown> | undefined;
-    const mergedValues: Record<string, unknown> = {
-      ...params.values,
-      ...(incomingStateBlob !== undefined
-        ? { state: reduceChannels(currentStateBlob, incomingStateBlob) }
-        : {}),
-    };
+    const mergedValues = reduceChannels(currentValues, params.values, DEFAULT_CHANNEL_REDUCERS);
 
     const newState: ThreadState = {
       values: mergedValues,
